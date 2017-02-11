@@ -292,7 +292,42 @@ module Parser = struct
         )
 end
 
-module Transport = struct
+module type Transport_S = sig
+  module Polling : sig
+    val name : string
+
+    type poll_error =
+      { code : int
+      ; body : string
+      }
+    exception Polling_exception of poll_error
+  end
+
+  module WebSocket : sig
+    val name : string
+  end
+
+  type t
+
+  val string_of_t : t -> string
+  val ready_state : t -> ready_state
+  val packet_stream : t -> Packet.t Lwt_stream.t
+
+  val create_websocket : Uri.t -> t
+  val create_polling : Uri.t -> t
+
+  val open_ : t -> t Lwt.t
+  val write : t -> Packet.t list -> unit Lwt.t
+  val receive : t -> unit Lwt.t
+  val close : t -> t Lwt.t
+
+  val push_packet : t -> Packet.t option -> unit
+
+  val on_open : t -> Parser.handshake -> t
+  val on_close : t -> t
+end
+
+module Transport : Transport_S = struct
   let log_receive_packets : section:Lwt_log.section -> Packet.t list -> unit Lwt.t =
     fun ~section packets ->
       Lwt_log.info_f ~section "receive packets [%s]"
@@ -582,6 +617,10 @@ module Transport = struct
                Lwt_log.error_f ~section "receive: %s" (Printexc.to_string exn) >>= fun () ->
                Lwt.fail exn)
 
+    let packet_stream : t -> Packet.t Lwt_stream.t =
+      fun t ->
+        t.packets
+
     let on_close : t -> t =
       fun t ->
         { t with
@@ -606,6 +645,13 @@ module Transport = struct
     function
     | Polling _ -> Polling.name
     | WebSocket _ -> WebSocket.name
+
+  let ready_state : t -> ready_state =
+    function
+    | Polling polling ->
+      Polling.(polling.ready_state)
+    | WebSocket websocket ->
+      WebSocket.(websocket.ready_state)
 
   let create_polling : Uri.t -> t =
     fun uri ->
@@ -679,7 +725,7 @@ module Transport = struct
       Lwt.return (WebSocket websocket)
 end
 
-module Socket = struct
+module Make_Socket(Transport : Transport_S) = struct
   let section = Lwt_log.Section.make "eio.socket"
 
   type t =
@@ -778,16 +824,15 @@ module Socket = struct
         Transport.string_of_t current_transport <> Transport.WebSocket.name
       in
       if should_probe then
-        let open Transport.WebSocket in
-        create uri
-        |> open_ >>= fun websocket ->
+        Transport.create_websocket uri
+        |> Transport.open_ >>= fun websocket ->
         Lwt_log.info ~section "Probing websocket transport..." >>= fun () ->
-        write websocket [Packet.ping_probe] >>= fun () ->
-        receive websocket >>= fun () ->
-        (Lwt_stream.get websocket.packets >>= function
+        Transport.write websocket [Packet.ping_probe] >>= fun () ->
+        Transport.receive websocket >>= fun () ->
+        (Lwt_stream.get (Transport.packet_stream websocket) >>= function
           | Some (Packet.PONG, Packet.P_String "probe") ->
             Lwt_log.info ~section "Ok to upgrade." >>= fun () ->
-            Lwt.return (Some (Transport.WebSocket websocket))
+            Lwt.return (Some websocket)
           | Some (packet_type, packet_data) ->
             Lwt_log.error_f ~section "Can not upgrade. Expecting PONG, but got '%s'."
               (Packet.string_of_packet_type packet_type) >>= fun () ->
@@ -864,12 +909,7 @@ module Socket = struct
            ~default:"(no handshake)"
            ~f:(fun handshake -> Format.sprintf "(%s)" (Parser.string_of_handshake handshake))) >>= fun () ->
       Lwt_log.debug_f ~section "Transport is %s (%s)"
-        (string_of_ready_state
-           (match socket.transport with
-            | Transport.Polling polling ->
-              Transport.Polling.(polling.ready_state)
-            | Transport.WebSocket websocket ->
-              Transport.WebSocket.(websocket.ready_state)))
+        (string_of_ready_state (Transport.ready_state socket.transport))
         (Transport.string_of_t socket.transport)
 
   let maybe_poll_again poll_promise socket =
@@ -1093,3 +1133,5 @@ module Socket = struct
 
       maintain_connection poll_promise user_promise socket
 end
+
+module Socket = Make_Socket(Transport)
