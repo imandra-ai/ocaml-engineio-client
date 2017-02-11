@@ -175,6 +175,100 @@ let socketio_parser_suite =
   ; "Socketio_client.Parser.encode_packet ACK with namespace" >:: test_encode_ack_namespace
   ]
 
+module Mock_Transport : Engineio_client.Transport_S = struct
+  open Engineio_client
+
+  module Polling = struct
+
+    let name = "polling"
+
+    type poll_error =
+      { code : int
+      ; body : string
+      }
+    exception Polling_exception of poll_error
+  end
+
+  module WebSocket = struct
+    let name = "websocket"
+  end
+
+  type transport =
+    | Polling
+    | WebSocket
+
+  type t =
+      { transport : transport
+      ; ready_state : ready_state
+      ; packets : Packet.t Lwt_stream.t
+      ; push_packet : Packet.t option -> unit
+      }
+
+  let string_of_t : t -> string =
+    fun t ->
+      match t.transport with
+      | Polling -> Polling.name
+      | WebSocket -> WebSocket.name
+
+  let ready_state : t -> ready_state =
+    fun t ->
+      t.ready_state
+
+  let packet_stream : t -> Packet.t Lwt_stream.t =
+    fun t ->
+      t.packets
+
+  let create : transport -> Uri.t -> t =
+    fun transport uri ->
+      let packets, push_packet = Lwt_stream.create () in
+      { transport =
+          transport
+      ; ready_state =
+          Closed
+      ; packets =
+          packets
+      ; push_packet =
+          push_packet
+      }
+
+  let create_polling : Uri.t -> t =
+    fun uri ->
+      create Polling uri
+
+  let create_websocket : Uri.t -> t =
+    fun uri ->
+      create WebSocket uri
+
+  let open_ : t -> t Lwt.t =
+    fun t -> Lwt.return t
+
+  let write : t -> Packet.t list -> unit Lwt.t =
+    fun t packets ->
+      Lwt.return_unit
+
+  let receive : t -> unit Lwt.t =
+    fun t ->
+      Lwt.return_unit
+
+  let close : t -> t Lwt.t =
+    fun t ->
+      Lwt.return t
+
+  let push_packet : t -> Packet.t option -> unit =
+    fun t packet ->
+      t.push_packet packet
+
+  let on_open : t -> Parser.handshake -> t =
+    fun t handshake ->
+      t
+
+  let on_close : t -> t =
+    fun t ->
+      t
+end
+
+module Mock_Socket = Engineio_client.Make_Socket(Mock_Transport)
+
 
 let () =
   run_test_tt_main

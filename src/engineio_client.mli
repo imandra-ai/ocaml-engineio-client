@@ -17,6 +17,11 @@
 (* limitations under the License.                                           *)
 (*                                                                          *)
 
+type ready_state =
+  | Opening
+  | Open
+  | Closed
+
 module Packet : sig
   (** Packets *)
 
@@ -48,6 +53,8 @@ end
 module Parser : sig
   val decode_payload_as_binary : string -> Packet.t list
   val encode_payload : Packet.t list -> string
+
+  type handshake
 end
 
 module Socket : sig
@@ -71,3 +78,40 @@ module Socket : sig
   *)
   val with_connection : Uri.t -> ((Packet.t Lwt_stream.t) -> (string -> unit Lwt.t) -> 'a Lwt.t) -> 'a Lwt.t
 end
+
+module type Transport_S = sig
+  module Polling : sig
+    val name : string
+
+    type poll_error =
+      { code : int
+      ; body : string
+      }
+    exception Polling_exception of poll_error
+  end
+
+  module WebSocket : sig
+    val name : string
+  end
+
+  type t
+
+  val string_of_t : t -> string
+  val ready_state : t -> ready_state
+  val packet_stream : t -> Packet.t Lwt_stream.t
+
+  val create_websocket : Uri.t -> t
+  val create_polling : Uri.t -> t
+
+  val open_ : t -> t Lwt.t
+  val write : t -> Packet.t list -> unit Lwt.t
+  val receive : t -> unit Lwt.t
+  val close : t -> t Lwt.t
+
+  val push_packet : t -> Packet.t option -> unit
+
+  val on_open : t -> Parser.handshake -> t
+  val on_close : t -> t
+end
+
+module Make_Socket(Transport : Transport_S) : module type of Socket
